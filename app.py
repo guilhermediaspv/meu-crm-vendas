@@ -5,7 +5,7 @@ from datetime import datetime
 
 st.set_page_config(page_title="CRM Inside Sales", layout="wide")
 
-# Estilização básica
+# Estilização
 st.markdown("""
     <style>
     .stButton>button { width: 100%; border-radius: 8px; background-color: #25D366; color: white; border: none; height: 3em; }
@@ -15,7 +15,7 @@ st.markdown("""
 
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- LOGIN ---
+# LOGIN
 if 'logado' not in st.session_state:
     st.session_state.logado = False
 
@@ -30,98 +30,85 @@ if not st.session_state.logado:
             st.rerun()
     st.stop()
 
-# --- LEITURA (MÉTODO LIMPO) ---
+# LEITURA
 try:
-    # Lemos os dados brutos e convertemos para uma lista de dicionários imediatamente
-    # Isso mata qualquer vínculo com "slices" do Pandas
-    data_df = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0)
-    lista_leads = data_df.to_dict(orient='records')
-    
-    # Criamos um DataFrame novo apenas para o filtro do Kanban
-    df_kanban = pd.DataFrame(lista_leads)
-    df_kanban.columns = [str(c).strip() for c in df_kanban.columns]
+    # Lemos a planilha e transformamos em uma LISTA PURA de Python imediatamente.
+    # Isso desconecta o dado da planilha e mata o erro de "Slice".
+    df_inicial = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0)
+    lista_de_dados = df_inicial.to_dict(orient='records')
 except Exception as e:
-    st.error(f"Erro ao carregar planilha: {e}")
+    st.error(f"Erro na leitura: {e}")
     st.stop()
 
-# Filtro de Leads
-if 'Vendedor' in df_kanban.columns:
-    df_kanban['Vendedor'] = df_kanban['Vendedor'].astype(str).str.lower().str.strip()
-    meus_leads = df_kanban[df_kanban["Vendedor"] == st.session_state.vendedor_email]
-else:
-    st.error("Coluna 'Vendedor' não encontrada.")
-    st.stop()
-
-# --- SIDEBAR ---
+# SIDEBAR
 st.sidebar.write(f"### Oi, {st.session_state.vendedor_nome}! 👋")
-if st.sidebar.button("Sair"):
-    st.session_state.logado = False
-    st.rerun()
 
 with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
-    with st.form("form_vendas", clear_on_submit=True):
-        nome = st.text_input("Nome do Cliente")
+    with st.form("form_novo"):
+        nome = st.text_input("Nome")
         tel = st.text_input("Telefone")
         plat = st.selectbox("Plataforma", ["Hyperflow", "Whatsapp"])
         status_sel = st.selectbox("Status", ["Quente", "Morno", "Frio"])
         d = st.date_input("Data", datetime.now())
         t = st.time_input("Hora", datetime.now())
-        data_string = f"{d.strftime('%d/%m/%Y')} {t.strftime('%H:%M')}"
-
-        if st.form_submit_button("Salvar"):
+        
+        if st.form_submit_button("Salvar Lead"):
             if nome and tel:
-                # Criamos o novo registro
-                novo_registro = {
+                # CRIAMOS O NOVO DICIONÁRIO
+                novo = {
                     "Nome do Cliente": nome,
                     "Plataforma": plat,
                     "Telefone": str(tel),
                     "Status": status_sel,
-                    "Última Interação": data_string,
+                    "Última Interação": f"{d.strftime('%d/%m/%Y')} {t.strftime('%H:%M')}",
                     "Vendedor": st.session_state.vendedor_email
                 }
                 
-                # ADICIONAR À LISTA E RECONSTRUIR O DATAFRAME DO ZERO
-                # Esta é a única forma de garantir que o Pandas não reclame de "Slice"
-                lista_leads.append(novo_registro)
-                df_final = pd.DataFrame(lista_leads)
+                # RECONSTRUÇÃO ATÔMICA:
+                # Criamos uma nova lista, adicionamos o antigo + o novo.
+                nova_lista_completa = lista_de_dados + [novo]
                 
-                # Forçar a limpeza de qualquer coluna fantasma antes de salvar
-                df_final = df_final[["Nome do Cliente", "Plataforma", "Telefone", "Status", "Última Interação", "Vendedor"]]
+                # Transformamos em um DataFrame NOVO, do zero, sem NENHUM histórico.
+                df_para_enviar = pd.DataFrame(nova_lista_completa)
+                
+                # Filtramos as colunas para garantir que não vá lixo
+                cols = ["Nome do Cliente", "Plataforma", "Telefone", "Status", "Última Interação", "Vendedor"]
+                df_para_enviar = df_para_enviar[cols]
                 
                 try:
-                    # O segredo: usamos o df_final que foi recém-criado, sem metadados antigos
-                    conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=df_final)
+                    # O comando UPDATE agora recebe um objeto que nunca viu a planilha antes
+                    conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=df_para_enviar)
                     st.success("✅ Salvo!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erro ao salvar: {e}")
-            else:
-                st.warning("Preencha Nome e Telefone.")
 
-# --- KANBAN ---
+# KANBAN (Usando a lista que já temos em memória)
 st.title("📋 Meus Follow-ups")
+df_kanban = pd.DataFrame(lista_de_dados)
+if not df_kanban.empty:
+    df_kanban['Vendedor'] = df_kanban['Vendedor'].astype(str).str.lower()
+    meus_leads = df_kanban[df_kanban["Vendedor"] == st.session_state.vendedor_email]
+else:
+    meus_leads = pd.DataFrame()
+
 c1, c2, c3 = st.columns(3)
 
-def render_card(row):
+def card(r):
     with st.container():
-        st.markdown(f"""
-            <div class="kanban-card">
-                <h4 style="margin:0;">{row.get('Nome do Cliente', 'N/A')}</h4>
-                <p style="margin:5px 0; color:#666; font-size:0.85em;">
-                    🚀 {row.get('Plataforma', '-')} | 🕒 {row.get('Última Interação', '-')}
-                </p>
-            </div>
-        """, unsafe_allow_html=True)
-        t_clean = "".join(filter(str.isdigit, str(row.get('Telefone', ''))))
-        st.link_button("💬 WhatsApp", f"https://wa.me/{t_clean}")
-        st.write("")
+        st.markdown(f'<div class="kanban-card"><h4>{r.get("Nome do Cliente","")}</h4><p>🚀 {r.get("Plataforma","")} | 🕒 {r.get("Última Interação","")}</p></div>', unsafe_allow_html=True)
+        num = "".join(filter(str.isdigit, str(r.get("Telefone",""))))
+        st.link_button("💬 WhatsApp", f"https://wa.me/{num}")
 
 with c1:
-    st.markdown("### 🔥 QUENTE")
-    for _, r in meus_leads[meus_leads["Status"].str.lower() == "quente"].iterrows(): render_card(r)
+    st.header("🔥 QUENTE")
+    if not meus_leads.empty:
+        for _, r in meus_leads[meus_leads["Status"].str.lower() == "quente"].iterrows(): card(r)
 with c2:
-    st.markdown("### 🌤️ MORNO")
-    for _, r in meus_leads[meus_leads["Status"].str.lower() == "morno"].iterrows(): render_card(r)
+    st.header("🌤️ MORNO")
+    if not meus_leads.empty:
+        for _, r in meus_leads[meus_leads["Status"].str.lower() == "morno"].iterrows(): card(r)
 with c3:
-    st.markdown("### ❄️ FRIO")
-    for _, r in meus_leads[meus_leads["Status"].str.lower() == "frio"].iterrows(): render_card(r)
+    st.header("❄️ FRIO")
+    if not meus_leads.empty:
+        for _, r in meus_leads[meus_leads["Status"].str.lower() == "frio"].iterrows(): card(r)
