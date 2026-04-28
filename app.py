@@ -40,7 +40,7 @@ COLUNAS = [
     "Vendedor"
 ]
 
-WORKSHEET = "leads"
+WORKSHEET = 0
 
 
 # ---------------- LOGIN ----------------
@@ -74,7 +74,7 @@ if not st.session_state.logado:
 try:
     df_origem = conn.read(
         spreadsheet=st.secrets["public_gsheets_url"],
-        worksheet=WORKSHEET,
+        worksheet=0,
         ttl=0
     )
 
@@ -145,7 +145,7 @@ with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
                 try:
                     conn.update(
                         spreadsheet=st.secrets["public_gsheets_url"],
-                        worksheet=WORKSHEET,
+                        worksheet=0,
                         data=df_para_salvar
                     )
 
