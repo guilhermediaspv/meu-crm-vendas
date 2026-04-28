@@ -3,12 +3,10 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime
 
-# DESLIGA O AVISO DE CÓPIA DO PANDAS (O erro que está aparecendo)
-pd.options.mode.chained_assignment = None 
-
+# Configuração da página
 st.set_page_config(page_title="CRM Inside Sales", layout="wide")
 
-# Estilo visual
+# Estilo visual para o Kanban
 st.markdown("""
     <style>
     .stButton>button { width: 100%; border-radius: 8px; background-color: #25D366; color: white; border: none; height: 3em; }
@@ -16,9 +14,10 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# Conexão
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- LOGIN ---
+# --- SISTEMA DE LOGIN ---
 if 'logado' not in st.session_state:
     st.session_state.logado = False
 
@@ -33,29 +32,22 @@ if not st.session_state.logado:
             st.rerun()
     st.stop()
 
-# --- CARREGAMENTO DE DADOS (USANDO LISTAS PARA NÃO DAR ERRO) ---
-try:
-    # Lemos a planilha
-    df_db = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0)
-    
-    # Criamos uma cópia profunda e isolada
-    df_limpo = pd.DataFrame(df_db.values, columns=df_db.columns).copy()
-    
-    # Filtramos apenas os leads do vendedor logado
-    if 'Vendedor' in df_limpo.columns:
-        meus_leads = df_limpo[df_limpo['Vendedor'].astype(str).str.lower() == st.session_state.vendedor_email].copy()
-    else:
-        st.error("Coluna 'Vendedor' não encontrada.")
-        st.stop()
-except Exception as e:
-    st.error(f"Erro ao carregar: {e}")
+# --- CARREGAMENTO DE DADOS (LEITURA APENAS) ---
+# Usamos o .copy() para garantir que o que lemos não está "preso" à planilha
+df_view = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0).copy()
+
+# Filtro para o Kanban
+if 'Vendedor' in df_view.columns:
+    meus_leads = df_view[df_view['Vendedor'].astype(str).str.lower() == st.session_state.vendedor_email].copy()
+else:
+    st.error("Erro: Coluna 'Vendedor' não encontrada na planilha.")
     st.stop()
 
 # --- SIDEBAR (CADASTRO) ---
 st.sidebar.write(f"### Oi, {st.session_state.vendedor_nome}! 👋")
 
 with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
-    with st.form("form_final"):
+    with st.form("form_vendas_direto"):
         nome = st.text_input("Nome")
         tel = st.text_input("Telefone")
         plat = st.selectbox("Plataforma", ["Hyperflow", "Whatsapp"])
@@ -65,31 +57,31 @@ with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
         
         if st.form_submit_button("Salvar Lead"):
             if nome and tel:
-                # 1. Transformamos o banco atual em uma lista de dicionários (ISOLAMENTO TOTAL)
-                banco_em_lista = df_limpo.to_dict('records')
-                
-                # 2. Criamos o novo registro
-                novo = {
+                # ESTRATÉGIA NOVA: Criamos um DataFrame minúsculo de 1 linha
+                # Sem tentar ler ou concatenar com o banco antigo
+                novo_lead_df = pd.DataFrame([{
                     "Nome do Cliente": nome,
                     "Plataforma": plat,
                     "Telefone": str(tel),
                     "Status": status_sel,
                     "Última Interação": f"{d.strftime('%d/%m/%Y')} {t.strftime('%H:%M')}",
                     "Vendedor": st.session_state.vendedor_email
-                }
-                
-                # 3. Adicionamos o novo lead à lista
-                banco_em_lista.append(novo)
-                
-                # 4. Criamos um DataFrame NOVO do zero, sem metadados antigos
-                df_final = pd.DataFrame(banco_em_lista)
+                }])
                 
                 try:
-                    conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=df_final)
-                    st.success("✅ Cadastrado!")
+                    # USAMOS O COMANDO DE APPEND (ACRESCENTAR)
+                    # O segredo: Pegamos o DF original (df_view) e apenas adicionamos a linha nova
+                    # Sem fazer filtros ou manipulações antes do update
+                    df_atualizado = pd.concat([df_view, novo_lead_df], ignore_index=True)
+                    
+                    conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=df_atualizado)
+                    
+                    st.success("✅ Cadastrado com sucesso!")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Erro no Google: {e}")
+                    st.error(f"Erro ao salvar: {e}")
+            else:
+                st.warning("Preencha Nome e Telefone.")
 
 # --- KANBAN ---
 st.title("📋 Meus Follow-ups")
@@ -103,13 +95,15 @@ def card(r):
 
 with c1:
     st.header("🔥 QUENTE")
-    subset = meus_leads[meus_leads["Status"].str.lower() == "quente"]
-    for _, r in subset.iterrows(): card(r)
+    subset_q = meus_leads[meus_leads["Status"].str.lower() == "quente"]
+    for _, r in subset_q.iterrows(): card(r)
+
 with c2:
     st.header("🌤️ MORNO")
-    subset = meus_leads[meus_leads["Status"].str.lower() == "morno"]
-    for _, r in subset.iterrows(): card(r)
+    subset_m = meus_leads[meus_leads["Status"].str.lower() == "morno"]
+    for _, r in subset_m.iterrows(): card(r)
+
 with c3:
     st.header("❄️ FRIO")
-    subset = meus_leads[meus_leads["Status"].str.lower() == "frio"]
-    for _, r in subset.iterrows(): card(r)
+    subset_f = meus_leads[meus_leads["Status"].str.lower() == "frio"]
+    for _, r in subset_f.iterrows(): card(r)
