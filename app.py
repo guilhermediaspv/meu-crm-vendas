@@ -37,19 +37,28 @@ if not st.session_state.logado:
             st.rerun()
     st.stop()
 
-# --- LEITURA DOS DADOS ---
+# --- LEITURA E LIMPEZA DE DADOS ---
 try:
-    df = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0)
-    # Limpa nomes das colunas e remove linhas vazias
-    df.columns = [c.strip() for c in df.columns]
-    df = df.dropna(subset=['Nome do Cliente']) 
+    df_raw = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0)
+    
+    # LIMPEZA CRÍTICA: Remove colunas sem nome ou duplicadas que causam o erro
+    df = df_raw.loc[:, ~df_raw.columns.str.contains('^Unnamed')] # Remove colunas fantasmas
+    df = df.loc[:, ~df.columns.duplicated()] # Remove colunas com nomes repetidos
+    df.columns = [c.strip() for c in df.columns] # Remove espaços nos nomes
+    
+    # Remove linhas totalmente vazias
+    df = df.dropna(how='all')
 except Exception as e:
-    st.error("Erro ao carregar dados. Verifique se a planilha tem os cabeçalhos corretos.")
+    st.error(f"Erro ao carregar dados: {e}")
     st.stop()
 
-# Filtro de Leads (Garante que não falhe por causa de espaços ou maiúsculas no e-mail)
-df['Vendedor'] = df['Vendedor'].astype(str).str.strip().str.lower()
-meus_leads = df[df["Vendedor"] == st.session_state.vendedor_email]
+# Filtro de Leads
+if 'Vendedor' in df.columns:
+    df['Vendedor'] = df['Vendedor'].astype(str).str.strip().str.lower()
+    meus_leads = df[df["Vendedor"] == st.session_state.vendedor_email]
+else:
+    st.error("Coluna 'Vendedor' não encontrada.")
+    st.stop()
 
 # --- SIDEBAR ---
 st.sidebar.write(f"### Oi, {st.session_state.vendedor_nome}! 👋")
@@ -69,19 +78,31 @@ with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
 
         if st.form_submit_button("Salvar"):
             if nome and tel:
+                # Criamos a nova linha com as colunas EXATAS
                 nova_data = {
                     "Nome do Cliente": nome,
                     "Plataforma": plat,
-                    "Telefone": tel,
+                    "Telefone": str(tel),
                     "Status": status_sel,
                     "Última Interação": data_string,
                     "Vendedor": st.session_state.vendedor_email
                 }
+                
+                # Prepara o DataFrame para salvar
                 new_row = pd.DataFrame([nova_data])
+                
+                # Garante que o novo dado tenha as mesmas colunas do original antes de unir
+                # Isso evita criar colunas extras por acidente
                 updated_df = pd.concat([df, new_row], ignore_index=True)
-                conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=updated_df)
-                st.success("Salvo!")
-                st.rerun()
+                
+                try:
+                    conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=updated_df)
+                    st.success("Salvo!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao salvar: {e}")
+            else:
+                st.warning("Preencha Nome e Telefone.")
 
 # --- KANBAN ---
 st.title("📋 Meus Follow-ups")
@@ -97,11 +118,13 @@ def render_card(row):
                 </p>
             </div>
         """, unsafe_allow_html=True)
-        t = str(row.get('Telefone', '')).split('.')[0].replace(' ', '').replace('+', '')
-        st.link_button("💬 WhatsApp", f"https://wa.me/{t}")
+        # Limpa o telefone para o link
+        t_raw = str(row.get('Telefone', ''))
+        t_limpo = "".join(filter(str.isdigit, t_raw))
+        st.link_button("💬 WhatsApp", f"https://wa.me/{t_limpo}")
         st.write("")
 
-# Lógica para garantir que encontra o status independente de como foi escrito
+# Lógica dos Status
 with col_q:
     st.markdown("### 🔥 QUENTE")
     subset = meus_leads[meus_leads["Status"].astype(str).str.strip().str.lower() == "quente"]
