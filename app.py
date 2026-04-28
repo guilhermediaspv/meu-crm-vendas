@@ -6,61 +6,65 @@ from datetime import datetime
 # Configuração da página
 st.set_page_config(page_title="CRM Inside Sales", layout="wide")
 
-# Estilização CSS para o Front-end e esconder elementos desnecessários
+# Estilização CSS
 st.markdown("""
     <style>
-    .stButton>button { width: 100%; border-radius: 8px; height: 3em; background-color: #25D366; color: white; }
+    .stButton>button { width: 100%; border-radius: 8px; height: 3em; background-color: #25D366; color: white; border: none; }
+    .stButton>button:hover { background-color: #128C7E; color: white; }
     .kanban-card {
         background-color: white;
-        padding: 20px;
-        border-radius: 12px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        margin-bottom: 15px;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        margin-bottom: 10px;
         border-left: 5px solid #25D366;
     }
-    /* Esconder o menu do Streamlit para parecer um app nativo */
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
+    [data-testid="stSidebar"] { background-color: #f0f2f6; }
     </style>
     """, unsafe_allow_html=True)
 
 # Conexão com o Google Sheets
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- SISTEMA DE LOGIN ---
+# --- CONTROLE DE SESSÃO (LOGIN) ---
 if 'logado' not in st.session_state:
     st.session_state.logado = False
 
 if not st.session_state.logado:
-    st.title("🔐 Acesso ao CRM")
-    email_input = st.text_input("Digite seu e-mail corporativo para entrar:")
+    st.title("🔐 Login CRM")
+    email_input = st.text_input("E-mail corporativo:")
     if st.button("Entrar"):
         if email_input:
-            st.session_state.vendedor_email = email_input
-            # Extrai o nome antes do @ para a saudação (ex: guilherme.dias)
+            st.session_state.vendedor_email = email_input.strip().lower()
             st.session_state.vendedor_nome = email_input.split('@')[0].replace('.', ' ').title()
             st.session_state.logado = True
             st.rerun()
         else:
-            st.error("Por favor, insira um e-mail.")
+            st.error("Insira seu e-mail.")
     st.stop()
 
-# --- APP LOGADO ---
-
-# Lendo os dados da planilha
+# --- CARREGAMENTO DE DADOS ---
 try:
+    # ttl=0 para garantir dados sempre frescos
     df = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0)
+    # Limpa nomes de colunas (remove espaços extras)
+    df.columns = [c.strip() for c in df.columns]
 except Exception as e:
-    st.error("Erro ao ler a planilha. Verifique o link nos Secrets.")
+    st.error(f"Erro ao conectar na planilha: {e}")
     st.stop()
 
-# Filtro de Leads (usando o nome exato da sua coluna: 'Vendedor')
-meus_leads = df[df["Vendedor"] == st.session_state.vendedor_email]
+# Filtro de Leads do Vendedor
+# Nota: A coluna na planilha deve se chamar exatamente 'Vendedor'
+if 'Vendedor' in df.columns:
+    meus_leads = df[df["Vendedor"].str.lower() == st.session_state.vendedor_email]
+else:
+    st.error("Coluna 'Vendedor' não encontrada na planilha.")
+    st.stop()
 
-# --- BARRA LATERAL ---
+# --- SIDEBAR ---
 st.sidebar.write(f"### Oi, {st.session_state.vendedor_nome}! 👋")
 
-if st.sidebar.button("Sair / Trocar Conta"):
+if st.sidebar.button("Sair"):
     st.session_state.logado = False
     st.rerun()
 
@@ -68,77 +72,43 @@ st.sidebar.divider()
 
 # --- FORMULÁRIO DE CADASTRO ---
 with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
-    with st.form("form_cadastro", clear_on_submit=True):
+    with st.form("novo_lead", clear_on_submit=True):
         nome = st.text_input("Nome do Cliente")
         tel = st.text_input("Telefone (55...)")
-        # Opções limitadas conforme pedido
         plat = st.selectbox("Plataforma", ["Hyperflow", "Whatsapp"])
-        status = st.selectbox("Status", ["Quente", "Morno", "Frio"])
+        status_sel = st.selectbox("Status", ["Quente", "Morno", "Frio"])
         
-        # Data e Hora automática mas editável
-        data_hoje = datetime.now().date()
-        hora_agora = datetime.now().time()
-        
-        data_col, hora_col = st.columns(2)
-        data_f = data_col.date_input("Data", data_hoje)
-        hora_f = hora_col.time_input("Hora", hora_agora)
-        
-        # Junta data e hora para salvar
-        data_final = f"{data_f.strftime('%d/%m/%Y')} {hora_f.strftime('%H:%M')}"
+        # Data e Hora editáveis
+        d = st.date_input("Data", datetime.now())
+        t = st.time_input("Hora", datetime.now())
+        data_string = f"{d.strftime('%d/%m/%Y')} {t.strftime('%H:%M')}"
 
-        if st.form_submit_button("Salvar Lead"):
+        if st.form_submit_button("Salvar na Planilha"):
             if nome and tel:
-                # Criar nova linha (Certifique-se que os nomes das chaves são IGUAIS às colunas da planilha)
-                nova_linha = pd.DataFrame([{
+                # Criamos a linha garantindo os nomes das colunas da SUA planilha
+                # Importante: O nome das chaves abaixo deve ser IGUAL ao topo da sua planilha
+                nova_data = {
                     "Nome do Cliente": nome,
                     "Plataforma": plat,
                     "Telefone": tel,
-                    "Status": status,
-                    "Última Interação": data_final,
+                    "Status": status_sel,
+                    "Última Interação": data_string,
                     "Vendedor": st.session_state.vendedor_email
-                }])
+                }
                 
-                # Unir e atualizar
-                updated_df = pd.concat([df, nova_linha], ignore_index=True)
-                conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=updated_df)
-                st.toast("Lead salvo com sucesso!")
-                st.rerun()
+                new_row = pd.DataFrame([nova_data])
+                updated_df = pd.concat([df, new_row], ignore_index=True)
+                
+                try:
+                    conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=updated_df)
+                    st.success("Salvo!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Erro ao salvar. Verifique se os nomes das colunas na planilha estão idênticos aos do código.")
             else:
-                st.error("Preencha Nome e Telefone.")
+                st.warning("Preencha os campos obrigatórios.")
 
 # --- KANBAN ---
 st.title("📋 Meus Follow-ups")
 
-col1, col2, col3 = st.columns(3)
-
-def render_card(row):
-    with st.container():
-        st.markdown(f"""
-            <div class="kanban-card">
-                <h3 style="margin:0; color:#1f1f1f;">{row['Nome do Cliente']}</h3>
-                <p style="margin:5px 0; color:#666; font-size:0.9em;">
-                    🚀 {row['Plataforma']}<br>
-                    🕒 {row['Última Interação']}
-                </p>
-            </div>
-        """, unsafe_allow_html=True)
-        # Limpa o telefone para o link
-        numero = str(row['Telefone']).replace('.0', '').replace(' ', '').replace('+', '')
-        st.link_button(f"💬 WhatsApp", f"https://wa.me/{numero}")
-        st.write("")
-
-# Mapeamento exato para bater com as colunas da sua planilha (case sensitive)
-with col1:
-    st.markdown("### 🔥 QUENTE")
-    for _, row in meus_leads[meus_leads["Status"].str.capitalize() == "Quente"].iterrows():
-        render_card(row)
-
-with col2:
-    st.markdown("### 🌤️ MORNO")
-    for _, row in meus_leads[meus_leads["Status"].str.capitalize() == "Morno"].iterrows():
-        render_card(row)
-
-with col3:
-    st.markdown("### ❄️ FRIO")
-    for _, row in meus_leads[meus_leads["Status"].str.capitalize() == "Frio"].iterrows():
-        render_card(row)
+col_q, col_m, col_f = st.columns(3)
