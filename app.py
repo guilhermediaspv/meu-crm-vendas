@@ -37,18 +37,21 @@ if not st.session_state.logado:
             st.rerun()
     st.stop()
 
-# --- LEITURA DOS DADOS ---
+# --- LEITURA DOS DADOS (MODO SEGURO) ---
 try:
-    # Lemos apenas as colunas que importam para o Kanban
-    df = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0).copy()
-    # Limpeza básica de nomes de colunas
+    # Lemos os dados e forçamos a criação de um DataFrame totalmente novo
+    data = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0)
+    df = pd.DataFrame(data.values, columns=data.columns).copy()
+    
+    # Limpeza de nomes de colunas
     df.columns = [str(c).strip() for c in df.columns]
 except Exception as e:
     st.error(f"Erro ao carregar dados: {e}")
     st.stop()
 
-# Filtro de Leads para o Vendedor logado
+# Filtro de Leads (usando uma cópia profunda para evitar o erro de Slice)
 if 'Vendedor' in df.columns:
+    # Converte para string e limpa antes de filtrar
     df['Vendedor'] = df['Vendedor'].astype(str).str.strip().str.lower()
     meus_leads = df[df["Vendedor"] == st.session_state.vendedor_email].copy()
 else:
@@ -73,27 +76,30 @@ with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
 
         if st.form_submit_button("Salvar"):
             if nome and tel:
-                # Criamos um dicionário simples com os novos dados
-                novo_dado = {
-                    "Nome do Cliente": [nome],
-                    "Plataforma": [plat],
-                    "Telefone": [str(tel)],
-                    "Status": [status_sel],
-                    "Última Interação": [data_string],
-                    "Vendedor": [st.session_state.vendedor_email]
+                # 1. Criamos a nova linha
+                novo_lead = {
+                    "Nome do Cliente": nome,
+                    "Plataforma": plat,
+                    "Telefone": str(tel),
+                    "Status": status_sel,
+                    "Última Interação": data_string,
+                    "Vendedor": st.session_state.vendedor_email
                 }
-                new_df = pd.DataFrame(novo_dado)
                 
-                # Juntamos ao DataFrame atual e salvamos TUDO de novo
-                # Esta é a forma mais segura para evitar o erro de 'Slice'
-                full_df = pd.concat([df, new_df], ignore_index=True)
+                # 2. Transformamos o DF original em uma lista de dicionários (método mais estável)
+                lista_dados = df.to_dict('records')
+                lista_dados.append(novo_lead)
+                
+                # 3. Criamos um DataFrame NOVO do zero a partir da lista
+                df_final = pd.DataFrame(lista_dados)
                 
                 try:
-                    conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=full_df)
-                    st.success("Lead salvo!")
+                    # 4. Sobrecarregamos a planilha com o novo objeto limpo
+                    conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=df_final)
+                    st.success("✅ Lead salvo com sucesso!")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Erro ao salvar na planilha: {e}")
+                    st.error(f"Erro ao salvar: {e}")
             else:
                 st.warning("Preencha Nome e Telefone.")
 
@@ -116,21 +122,21 @@ def render_card(row):
         st.link_button("💬 WhatsApp", f"https://wa.me/{t_limpo}")
         st.write("")
 
-# Lógica dos Status
+# Lógica dos Status (Normalizada para evitar erros de case/espaço)
+def filtrar_status(status_busca):
+    return meus_leads[meus_leads["Status"].astype(str).str.strip().str.lower() == status_busca.lower()]
+
 with col_q:
     st.markdown("### 🔥 QUENTE")
-    subset = meus_leads[meus_leads["Status"].astype(str).str.strip().str.lower() == "quente"]
-    for _, r in subset.iterrows():
+    for _, r in filtrar_status("Quente").iterrows():
         render_card(r)
 
 with col_m:
     st.markdown("### 🌤️ MORNO")
-    subset = meus_leads[meus_leads["Status"].astype(str).str.strip().str.lower() == "morno"]
-    for _, r in subset.iterrows():
+    for _, r in filtrar_status("Morno").iterrows():
         render_card(r)
 
 with col_f:
     st.markdown("### ❄️ FRIO")
-    subset = meus_leads[meus_leads["Status"].astype(str).str.strip().str.lower() == "frio"]
-    for _, r in subset.iterrows():
+    for _, r in filtrar_status("Frio").iterrows():
         render_card(r)
