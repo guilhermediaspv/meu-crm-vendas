@@ -6,7 +6,7 @@ from datetime import datetime
 # Configuração da página
 st.set_page_config(page_title="CRM Inside Sales", layout="wide")
 
-# Estilo visual para o Kanban
+# Estilo visual
 st.markdown("""
     <style>
     .stButton>button { width: 100%; border-radius: 8px; background-color: #25D366; color: white; border: none; height: 3em; }
@@ -14,10 +14,9 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# Conexão
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# --- SISTEMA DE LOGIN ---
+# --- LOGIN ---
 if 'logado' not in st.session_state:
     st.session_state.logado = False
 
@@ -32,22 +31,29 @@ if not st.session_state.logado:
             st.rerun()
     st.stop()
 
-# --- CARREGAMENTO DE DADOS (LEITURA APENAS) ---
-# Usamos o .copy() para garantir que o que lemos não está "preso" à planilha
-df_view = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0).copy()
-
-# Filtro para o Kanban
-if 'Vendedor' in df_view.columns:
-    meus_leads = df_view[df_view['Vendedor'].astype(str).str.lower() == st.session_state.vendedor_email].copy()
-else:
-    st.error("Erro: Coluna 'Vendedor' não encontrada na planilha.")
+# --- LEITURA (APENAS PARA O KANBAN) ---
+try:
+    # Lemos os dados e transformamos em uma lista simples de dicionários IMEDIATAMENTE
+    # Isso garante que o Kanban não tenha NENHUMA ligação com a parte de salvamento
+    data_raw = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0)
+    lista_leads = data_raw.to_dict(orient='records')
+    df_kanban = pd.DataFrame(lista_leads)
+    
+    if 'Vendedor' in df_kanban.columns:
+        df_kanban['Vendedor'] = df_kanban['Vendedor'].astype(str).str.lower()
+        meus_leads = df_kanban[df_kanban["Vendedor"] == st.session_state.vendedor_email].copy()
+    else:
+        st.error("Coluna 'Vendedor' não encontrada.")
+        st.stop()
+except Exception as e:
+    st.error(f"Erro ao carregar: {e}")
     st.stop()
 
 # --- SIDEBAR (CADASTRO) ---
 st.sidebar.write(f"### Oi, {st.session_state.vendedor_nome}! 👋")
 
 with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
-    with st.form("form_vendas_direto"):
+    with st.form("form_final_mesmo"):
         nome = st.text_input("Nome")
         tel = st.text_input("Telefone")
         plat = st.selectbox("Plataforma", ["Hyperflow", "Whatsapp"])
@@ -57,9 +63,9 @@ with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
         
         if st.form_submit_button("Salvar Lead"):
             if nome and tel:
-                # ESTRATÉGIA NOVA: Criamos um DataFrame minúsculo de 1 linha
-                # Sem tentar ler ou concatenar com o banco antigo
-                novo_lead_df = pd.DataFrame([{
+                # CRIAMOS UM DATAFRAME TOTALMENTE NOVO DE 1 LINHA
+                # Ele não tem ligação com o df_kanban ou com a leitura inicial
+                novo_lead = pd.DataFrame([{
                     "Nome do Cliente": nome,
                     "Plataforma": plat,
                     "Telefone": str(tel),
@@ -69,41 +75,40 @@ with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
                 }])
                 
                 try:
-                    # USAMOS O COMANDO DE APPEND (ACRESCENTAR)
-                    # O segredo: Pegamos o DF original (df_view) e apenas adicionamos a linha nova
-                    # Sem fazer filtros ou manipulações antes do update
-                    df_atualizado = pd.concat([df_view, novo_lead_df], ignore_index=True)
+                    # EM VEZ DE UPDATE, USAMOS UMA TÉCNICA DE RECONSTRUÇÃO LIMPA
+                    # Pegamos a lista original, adicionamos o novo dicionário e sobrescrevemos tudo
+                    # Isso evita que o Pandas tente "fatiar" (slice) os dados
+                    full_data_list = lista_leads + novo_lead.to_dict(orient='records')
+                    df_to_save = pd.DataFrame(full_data_list)
                     
-                    conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=df_atualizado)
+                    conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=df_to_save)
                     
-                    st.success("✅ Cadastrado com sucesso!")
+                    st.success("✅ Cadastrado!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erro ao salvar: {e}")
-            else:
-                st.warning("Preencha Nome e Telefone.")
 
 # --- KANBAN ---
 st.title("📋 Meus Follow-ups")
 c1, c2, c3 = st.columns(3)
 
-def card(r):
+def render_card(row):
     with st.container():
-        st.markdown(f'<div class="kanban-card"><h4>{r.get("Nome do Cliente","")}</h4><p>🚀 {r.get("Plataforma","")} | 🕒 {r.get("Última Interação","")}</p></div>', unsafe_allow_html=True)
-        num = "".join(filter(str.isdigit, str(r.get("Telefone",""))))
-        st.link_button("💬 WhatsApp", f"https://wa.me/{num}")
+        st.markdown(f"""
+            <div class="kanban-card">
+                <h4>{row.get('Nome do Cliente', 'N/A')}</h4>
+                <p>🚀 {row.get('Plataforma', '-')} | 🕒 {row.get('Última Interação', '-')}</p>
+            </div>
+        """, unsafe_allow_html=True)
+        t_clean = "".join(filter(str.isdigit, str(row.get('Telefone', ''))))
+        st.link_button("💬 WhatsApp", f"https://wa.me/{t_clean}")
 
 with c1:
     st.header("🔥 QUENTE")
-    subset_q = meus_leads[meus_leads["Status"].str.lower() == "quente"]
-    for _, r in subset_q.iterrows(): card(r)
-
+    for _, r in meus_leads[meus_leads["Status"].str.lower() == "quente"].iterrows(): render_card(r)
 with c2:
     st.header("🌤️ MORNO")
-    subset_m = meus_leads[meus_leads["Status"].str.lower() == "morno"]
-    for _, r in subset_m.iterrows(): card(r)
-
+    for _, r in meus_leads[meus_leads["Status"].str.lower() == "morno"].iterrows(): render_card(r)
 with c3:
     st.header("❄️ FRIO")
-    subset_f = meus_leads[meus_leads["Status"].str.lower() == "frio"]
-    for _, r in subset_f.iterrows(): card(r)
+    for _, r in meus_leads[meus_leads["Status"].str.lower() == "frio"].iterrows(): render_card(r)
