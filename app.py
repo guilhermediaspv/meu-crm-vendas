@@ -3,10 +3,9 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime
 
-# Configuração da página
 st.set_page_config(page_title="CRM Inside Sales", layout="wide")
 
-# Estilização CSS
+# Estilização
 st.markdown("""
     <style>
     .stButton>button { width: 100%; border-radius: 8px; height: 3em; background-color: #25D366; color: white; border: none; }
@@ -37,25 +36,26 @@ if not st.session_state.logado:
             st.rerun()
     st.stop()
 
-# --- LEITURA DOS DADOS (MODO SEGURO) ---
+# --- LEITURA TOTALMENTE INDEPENDENTE ---
 try:
-    # Lemos os dados e forçamos a criação de um DataFrame totalmente novo
-    data = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0)
-    df = pd.DataFrame(data.values, columns=data.columns).copy()
+    # Lemos como DataFrame mas convertemos IMEDIATAMENTE para uma lista de dicionários
+    # Isso desconecta o dado de qualquer "fatia" da memória
+    raw_df = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0)
+    dados_lista = raw_df.to_dict('records')
     
-    # Limpeza de nomes de colunas
-    df.columns = [str(c).strip() for c in df.columns]
+    # Criamos um DF novo apenas para exibição no Kanban
+    df_exibicao = pd.DataFrame(dados_lista)
+    df_exibicao.columns = [str(c).strip() for c in df_exibicao.columns]
 except Exception as e:
     st.error(f"Erro ao carregar dados: {e}")
     st.stop()
 
-# Filtro de Leads (usando uma cópia profunda para evitar o erro de Slice)
-if 'Vendedor' in df.columns:
-    # Converte para string e limpa antes de filtrar
-    df['Vendedor'] = df['Vendedor'].astype(str).str.strip().str.lower()
-    meus_leads = df[df["Vendedor"] == st.session_state.vendedor_email].copy()
+# Filtro de Leads para o Kanban
+if 'Vendedor' in df_exibicao.columns:
+    df_exibicao['Vendedor'] = df_exibicao['Vendedor'].astype(str).str.strip().str.lower()
+    meus_leads = df_exibicao[df_exibicao["Vendedor"] == st.session_state.vendedor_email].copy()
 else:
-    st.error("A coluna 'Vendedor' não foi encontrada na planilha.")
+    st.error("Coluna 'Vendedor' não encontrada.")
     st.stop()
 
 # --- SIDEBAR ---
@@ -76,7 +76,7 @@ with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
 
         if st.form_submit_button("Salvar"):
             if nome and tel:
-                # 1. Criamos a nova linha
+                # Criamos o novo lead como um dicionário simples
                 novo_lead = {
                     "Nome do Cliente": nome,
                     "Plataforma": plat,
@@ -86,20 +86,18 @@ with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
                     "Vendedor": st.session_state.vendedor_email
                 }
                 
-                # 2. Transformamos o DF original em uma lista de dicionários (método mais estável)
-                lista_dados = df.to_dict('records')
-                lista_dados.append(novo_lead)
+                # ADICIONAMOS À LISTA PURA (Sem Pandas aqui para não dar erro de slice)
+                dados_lista.append(novo_lead)
                 
-                # 3. Criamos um DataFrame NOVO do zero a partir da lista
-                df_final = pd.DataFrame(lista_dados)
+                # Transformamos a lista final num DataFrame limpo apenas para o update
+                df_para_salvar = pd.DataFrame(dados_lista)
                 
                 try:
-                    # 4. Sobrecarregamos a planilha com o novo objeto limpo
-                    conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=df_final)
-                    st.success("✅ Lead salvo com sucesso!")
+                    conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=df_para_salvar)
+                    st.success("✅ Cadastrado com sucesso!")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Erro ao salvar: {e}")
+                    st.error(f"Erro no Google Sheets: {e}")
             else:
                 st.warning("Preencha Nome e Telefone.")
 
@@ -117,26 +115,21 @@ def render_card(row):
                 </p>
             </div>
         """, unsafe_allow_html=True)
-        t_raw = str(row.get('Telefone', ''))
-        t_limpo = "".join(filter(str.isdigit, t_raw))
+        t_limpo = "".join(filter(str.isdigit, str(row.get('Telefone', ''))))
         st.link_button("💬 WhatsApp", f"https://wa.me/{t_limpo}")
         st.write("")
 
-# Lógica dos Status (Normalizada para evitar erros de case/espaço)
-def filtrar_status(status_busca):
-    return meus_leads[meus_leads["Status"].astype(str).str.strip().str.lower() == status_busca.lower()]
+def filtrar(s):
+    return meus_leads[meus_leads["Status"].astype(str).str.strip().str.lower() == s.lower()]
 
 with col_q:
     st.markdown("### 🔥 QUENTE")
-    for _, r in filtrar_status("Quente").iterrows():
-        render_card(r)
+    for _, r in filtrar("Quente").iterrows(): render_card(r)
 
 with col_m:
     st.markdown("### 🌤️ MORNO")
-    for _, r in filtrar_status("Morno").iterrows():
-        render_card(r)
+    for _, r in filtrar("Morno").iterrows(): render_card(r)
 
 with col_f:
     st.markdown("### ❄️ FRIO")
-    for _, r in filtrar_status("Frio").iterrows():
-        render_card(r)
+    for _, r in filtrar("Frio").iterrows(): render_card(r)
