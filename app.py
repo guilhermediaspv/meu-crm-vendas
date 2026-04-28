@@ -37,29 +37,22 @@ if not st.session_state.logado:
             st.rerun()
     st.stop()
 
-# --- LEITURA E LIMPEZA DE DADOS ---
+# --- LEITURA DOS DADOS ---
 try:
-    # Lê a planilha e faz uma cópia real para evitar o erro de 'Slice'
-    df_raw = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0).copy()
-    
-    # Define as colunas que NÓS queremos (ignora o resto da planilha)
-    colunas_obrigatorias = ["Nome do Cliente", "Plataforma", "Telefone", "Status", "Última Interação", "Vendedor"]
-    
-    # Filtra apenas as colunas que existem e são necessárias
-    df = df_raw[[c for c in colunas_obrigatorias if c in df_raw.columns]].copy()
-    
-    # Remove linhas totalmente vazias
-    df = df.dropna(subset=[df.columns[0]]) if not df.empty else df
+    # Lemos apenas as colunas que importam para o Kanban
+    df = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0).copy()
+    # Limpeza básica de nomes de colunas
+    df.columns = [str(c).strip() for c in df.columns]
 except Exception as e:
     st.error(f"Erro ao carregar dados: {e}")
     st.stop()
 
-# Filtro de Leads
+# Filtro de Leads para o Vendedor logado
 if 'Vendedor' in df.columns:
     df['Vendedor'] = df['Vendedor'].astype(str).str.strip().str.lower()
     meus_leads = df[df["Vendedor"] == st.session_state.vendedor_email].copy()
 else:
-    st.error("Coluna 'Vendedor' não encontrada na planilha.")
+    st.error("A coluna 'Vendedor' não foi encontrada na planilha.")
     st.stop()
 
 # --- SIDEBAR ---
@@ -69,7 +62,7 @@ if st.sidebar.button("Sair"):
     st.rerun()
 
 with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
-    with st.form("novo_lead", clear_on_submit=True):
+    with st.form("form_novo_lead", clear_on_submit=True):
         nome = st.text_input("Nome do Cliente")
         tel = st.text_input("Telefone (55...)")
         plat = st.selectbox("Plataforma", ["Hyperflow", "Whatsapp"])
@@ -80,32 +73,27 @@ with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
 
         if st.form_submit_button("Salvar"):
             if nome and tel:
-                # Cria a nova linha exatamente com as colunas do DF atual
-                nova_data = {
-                    "Nome do Cliente": nome,
-                    "Plataforma": plat,
-                    "Telefone": str(tel),
-                    "Status": status_sel,
-                    "Última Interação": data_string,
-                    "Vendedor": st.session_state.vendedor_email
+                # Criamos um dicionário simples com os novos dados
+                novo_dado = {
+                    "Nome do Cliente": [nome],
+                    "Plataforma": [plat],
+                    "Telefone": [str(tel)],
+                    "Status": [status_sel],
+                    "Última Interação": [data_string],
+                    "Vendedor": [st.session_state.vendedor_email]
                 }
+                new_df = pd.DataFrame(novo_dado)
                 
-                new_row = pd.DataFrame([nova_data])
-                
-                # Garante que as colunas batem antes de unir
-                for col in df.columns:
-                    if col not in new_row.columns:
-                        new_row[col] = ""
-                
-                new_row = new_row[df.columns]
-                updated_df = pd.concat([df, new_row], ignore_index=True)
+                # Juntamos ao DataFrame atual e salvamos TUDO de novo
+                # Esta é a forma mais segura para evitar o erro de 'Slice'
+                full_df = pd.concat([df, new_df], ignore_index=True)
                 
                 try:
-                    conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=updated_df)
-                    st.success("Salvo com sucesso!")
+                    conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=full_df)
+                    st.success("Lead salvo!")
                     st.rerun()
                 except Exception as e:
-                    st.error(f"Erro ao salvar: {e}")
+                    st.error(f"Erro ao salvar na planilha: {e}")
             else:
                 st.warning("Preencha Nome e Telefone.")
 
@@ -128,7 +116,7 @@ def render_card(row):
         st.link_button("💬 WhatsApp", f"https://wa.me/{t_limpo}")
         st.write("")
 
-# Lógica dos Status (Normalizada)
+# Lógica dos Status
 with col_q:
     st.markdown("### 🔥 QUENTE")
     subset = meus_leads[meus_leads["Status"].astype(str).str.strip().str.lower() == "quente"]
