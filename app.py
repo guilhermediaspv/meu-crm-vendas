@@ -39,15 +39,17 @@ if not st.session_state.logado:
 
 # --- LEITURA E LIMPEZA DE DADOS ---
 try:
-    df_raw = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0)
+    # Lê a planilha e faz uma cópia real para evitar o erro de 'Slice'
+    df_raw = conn.read(spreadsheet=st.secrets["public_gsheets_url"], ttl=0).copy()
     
-    # LIMPEZA CRÍTICA: Remove colunas sem nome ou duplicadas que causam o erro
-    df = df_raw.loc[:, ~df_raw.columns.str.contains('^Unnamed')] # Remove colunas fantasmas
-    df = df.loc[:, ~df.columns.duplicated()] # Remove colunas com nomes repetidos
-    df.columns = [c.strip() for c in df.columns] # Remove espaços nos nomes
+    # Define as colunas que NÓS queremos (ignora o resto da planilha)
+    colunas_obrigatorias = ["Nome do Cliente", "Plataforma", "Telefone", "Status", "Última Interação", "Vendedor"]
+    
+    # Filtra apenas as colunas que existem e são necessárias
+    df = df_raw[[c for c in colunas_obrigatorias if c in df_raw.columns]].copy()
     
     # Remove linhas totalmente vazias
-    df = df.dropna(how='all')
+    df = df.dropna(subset=[df.columns[0]]) if not df.empty else df
 except Exception as e:
     st.error(f"Erro ao carregar dados: {e}")
     st.stop()
@@ -55,9 +57,9 @@ except Exception as e:
 # Filtro de Leads
 if 'Vendedor' in df.columns:
     df['Vendedor'] = df['Vendedor'].astype(str).str.strip().str.lower()
-    meus_leads = df[df["Vendedor"] == st.session_state.vendedor_email]
+    meus_leads = df[df["Vendedor"] == st.session_state.vendedor_email].copy()
 else:
-    st.error("Coluna 'Vendedor' não encontrada.")
+    st.error("Coluna 'Vendedor' não encontrada na planilha.")
     st.stop()
 
 # --- SIDEBAR ---
@@ -78,7 +80,7 @@ with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
 
         if st.form_submit_button("Salvar"):
             if nome and tel:
-                # Criamos a nova linha com as colunas EXATAS
+                # Cria a nova linha exatamente com as colunas do DF atual
                 nova_data = {
                     "Nome do Cliente": nome,
                     "Plataforma": plat,
@@ -88,16 +90,19 @@ with st.sidebar.expander("➕ CADASTRAR NOVO LEAD", expanded=True):
                     "Vendedor": st.session_state.vendedor_email
                 }
                 
-                # Prepara o DataFrame para salvar
                 new_row = pd.DataFrame([nova_data])
                 
-                # Garante que o novo dado tenha as mesmas colunas do original antes de unir
-                # Isso evita criar colunas extras por acidente
+                # Garante que as colunas batem antes de unir
+                for col in df.columns:
+                    if col not in new_row.columns:
+                        new_row[col] = ""
+                
+                new_row = new_row[df.columns]
                 updated_df = pd.concat([df, new_row], ignore_index=True)
                 
                 try:
                     conn.update(spreadsheet=st.secrets["public_gsheets_url"], data=updated_df)
-                    st.success("Salvo!")
+                    st.success("Salvo com sucesso!")
                     st.rerun()
                 except Exception as e:
                     st.error(f"Erro ao salvar: {e}")
@@ -118,13 +123,12 @@ def render_card(row):
                 </p>
             </div>
         """, unsafe_allow_html=True)
-        # Limpa o telefone para o link
         t_raw = str(row.get('Telefone', ''))
         t_limpo = "".join(filter(str.isdigit, t_raw))
         st.link_button("💬 WhatsApp", f"https://wa.me/{t_limpo}")
         st.write("")
 
-# Lógica dos Status
+# Lógica dos Status (Normalizada)
 with col_q:
     st.markdown("### 🔥 QUENTE")
     subset = meus_leads[meus_leads["Status"].astype(str).str.strip().str.lower() == "quente"]
